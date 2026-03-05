@@ -29,3 +29,5 @@ OCR_DPI = int(os.getenv("OCR_DPI", "200"))
 TROCR_ENABLED = os.getenv("TROCR_ENABLED", "1") == "1"
 TROCR_MODEL_NAME = os.getenv("TROCR_MODEL_NAME", "microsoft/trocr-base-handwritten")
 TROCR_TRIGGER_CONFIDENCE = float(os.getenv("TROCR_TRIGGER_CONFIDENCE", "55.0"))
+NATIVE_TEXT_SCORE_THRESHOLD = float(os.getenv("NATIVE_TEXT_SCORE_THRESHOLD", "2.2"))
+OCR_MAX_WORKERS = int(os.getenv("OCR_MAX_WORKERS", str(min(8, os.cpu_count() or 4))))
