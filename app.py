@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import fitz
 import re
 import streamlit as st
@@ -19,7 +20,7 @@ from src.utils import ensure_data_dirs, load_json, make_doc_id, save_json
 from src.vector_store import VectorStore
 
 
-st.set_page_config(page_title="Offline Notes QA", layout="wide")
+st.set_page_config(page_title="NotesPilot", layout="wide")
 
 PERFORMANCE_PRESETS = {
     "Fast": {"dpi": 170, "top_k": 4, "num_predict": 180},
@@ -54,27 +55,78 @@ def initialize_state() -> None:
         st.session_state.recent_sources = []
     if "qa_log" not in st.session_state:
         st.session_state.qa_log = []
+    if "last_question" not in st.session_state:
+        st.session_state.last_question = ""
 
 
 def main() -> None:
     ensure_data_dirs()
     initialize_state()
+    _inject_styles()
 
     encoder = get_encoder()
     store = get_store()
-    _inject_styles()
 
-    st.sidebar.title("Control Panel")
-    profile = st.sidebar.selectbox("Performance profile", list(PERFORMANCE_PRESETS.keys()), index=1)
-    preset = PERFORMANCE_PRESETS[profile]
+    profile, preset = _render_sidebar()
     ocr_dpi = preset["dpi"]
     top_k = preset["top_k"]
     num_predict = preset["num_predict"]
     timeout_s = config.OLLAMA_TIMEOUT_S
 
-    if st.sidebar.button("Clear chat"):
+    answerer = get_answerer(timeout_s=int(timeout_s))
+    retriever = Retriever(store=store, encoder=encoder)
+
+    _render_header(profile=profile, store=store)
+
+    left, center, right = st.columns([1.15, 2.15, 1.45], gap="large")
+    with left:
+        uploads = _render_upload_panel(encoder=encoder, store=store, ocr_dpi=ocr_dpi)
+    with center:
+        _render_chat_panel(
+            retriever=retriever,
+            answerer=answerer,
+            top_k=top_k,
+            num_predict=num_predict,
+        )
+    with right:
+        _render_evidence_panel()
+
+    st.markdown(
+        f"""
+        <div class="np-footer">
+          <span>Offline mode</span>
+          <span>Model: <code>{html.escape(config.OLLAMA_MODEL_NAME)}</code></span>
+          <span>Index DB: <code>{html.escape(str(config.VECTOR_DB_PATH))}</code></span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    _ = uploads  # suppress unused variable warning semantics
+
+
+def _render_sidebar() -> tuple[str, dict]:
+    st.sidebar.markdown(
+        """
+        <div class="np-sidebrand">
+          <div class="np-sidebrand-icon">NP</div>
+          <div>
+            <div class="np-sidebrand-title">NotesPilot</div>
+            <div class="np-sidebrand-sub">Offline Handwritten QA</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.sidebar.markdown("### Workspace")
+    profile = st.sidebar.selectbox("Performance profile", list(PERFORMANCE_PRESETS.keys()), index=1)
+    preset = PERFORMANCE_PRESETS[profile]
+
+    if st.sidebar.button("Clear chat", use_container_width=True):
         st.session_state.memory.clear()
         st.session_state.qa_log = []
+        st.session_state.last_contexts = []
+        st.session_state.recent_sources = []
         st.success("Chat cleared.")
 
     report_bytes = generate_pdf_report(
@@ -89,126 +141,191 @@ def main() -> None:
         mime="application/pdf",
         use_container_width=True,
     )
+    return profile, preset
 
-    answerer = get_answerer(timeout_s=int(timeout_s))
-    retriever = Retriever(store=store, encoder=encoder)
 
-    st.title("NotesPilot: Offline Handwritten Notes QA")
-    st.caption("Upload notes, build index, ask questions, and always get source-grounded answers.")
+def _render_header(profile: str, store: VectorStore) -> None:
     st.markdown(
         """
-        <div class="np-hero-meta">
-          <span class="np-pill">Offline-first</span>
-          <span class="np-pill">Source-grounded answers</span>
-          <span class="np-pill">Diagram-aware retrieval</span>
+        <div class="np-header">
+          <div class="np-header-title">NotesPilot</div>
+          <div class="np-header-sub">Modern offline AI assistant for handwritten and diagram-rich notes.</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+    m1, m2, m3, m4 = st.columns(4)
+    m1.markdown(_metric_card("Profile", profile), unsafe_allow_html=True)
+    m2.markdown(_metric_card("Indexed Chunks", str(store.count())), unsafe_allow_html=True)
+    m3.markdown(_metric_card("Documents", str(len(st.session_state.indexed_docs))), unsafe_allow_html=True)
+    m4.markdown(_metric_card("Status", "Ready"), unsafe_allow_html=True)
 
-    left, center, right = st.columns([1.25, 2.2, 1.4], gap="large")
 
-    with left:
-        st.markdown("### Upload & Index")
-        uploads = st.file_uploader("Add one or more PDF notes", type=["pdf"], accept_multiple_files=True)
-        if st.button("Process PDFs", type="primary", use_container_width=True):
-            if not uploads:
-                st.warning("Upload at least one PDF.")
-            else:
-                process_uploads(
-                    uploads=uploads,
-                    encoder=encoder,
-                    store=store,
-                    ocr_dpi=int(ocr_dpi),
-                    max_pages=None,
-                )
-                st.success("Processing complete.")
+def _metric_card(label: str, value: str) -> str:
+    return (
+        '<div class="np-metric">'
+        f'<div class="np-metric-value">{html.escape(value)}</div>'
+        f'<div class="np-metric-label">{html.escape(label)}</div>'
+        "</div>"
+    )
 
-    with center:
-        st.markdown("### Ask Questions")
+
+def _render_upload_panel(encoder: EmbeddingEncoder, store: VectorStore, ocr_dpi: int):
+    st.markdown("### Upload & Index")
+    st.markdown('<div class="np-section-sub">Drag PDFs and build your local search index.</div>', unsafe_allow_html=True)
+    uploads = st.file_uploader("Add one or more PDF notes", type=["pdf"], accept_multiple_files=True, label_visibility="collapsed")
+
+    if uploads:
+        st.markdown('<div class="np-file-grid">', unsafe_allow_html=True)
+        for up in uploads:
+            size_mb = up.size / (1024 * 1024)
+            st.markdown(
+                f"""
+                <div class="np-file-card">
+                  <div class="np-file-icon">PDF</div>
+                  <div class="np-file-meta">
+                    <div class="np-file-name">{html.escape(up.name)}</div>
+                    <div class="np-file-size">{size_mb:.2f} MB</div>
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    disabled = not bool(uploads)
+    if st.button("Process PDFs", type="primary", use_container_width=True, disabled=disabled):
+        process_uploads(
+            uploads=uploads,
+            encoder=encoder,
+            store=store,
+            ocr_dpi=int(ocr_dpi),
+            max_pages=None,
+        )
+        st.success("Processing complete.")
+    return uploads
+
+
+def _render_chat_panel(retriever: Retriever, answerer: AnswerGenerator, top_k: int, num_predict: int) -> None:
+    st.markdown("### Ask Questions")
+    st.markdown('<div class="np-section-sub">Chat with your notes. Every answer is evidence-grounded.</div>', unsafe_allow_html=True)
+
+    chat_shell = st.container()
+    with chat_shell:
         for msg in st.session_state.memory.get():
             with st.chat_message(msg["role"]):
                 st.write(msg["content"])
 
-        question = st.chat_input("Ask from your uploaded notes only...")
-        if question:
-            st.session_state.memory.add_user(question)
-            with st.chat_message("user"):
-                st.write(question)
+    question = st.chat_input("Ask from your uploaded notes only...")
+    if question:
+        st.session_state.last_question = question
+        st.session_state.memory.add_user(question)
+        with st.chat_message("user"):
+            st.write(question)
 
-            with st.spinner("Retrieving evidence and generating answer..."):
-                effective_top_k = _get_query_top_k(question, top_k)
-                chunks, scores = retriever.search(question, top_k=effective_top_k)
-                chunks, scores = _rerank_chunks_for_query(chunks, scores, question)
-                st.session_state.last_contexts = chunks
-                try:
-                    raw = answerer.generate_answer(
-                        question,
-                        chunks,
-                        st.session_state.memory.get(),
-                        num_predict=num_predict,
-                    )
-                    final = validate(raw.answer, chunks, scores)
-                except LLMRuntimeError as exc:
-                    final = FinalResponse(
-                        answer=(
-                            "I couldn't generate the answer because local model memory is full. "
-                            "Please use a smaller model or close other GPU-heavy apps."
-                        ),
-                        citations=[],
-                        confidence="Low",
-                        rejected=True,
-                        reason=str(exc),
-                    )
-                st.session_state.memory.add_assistant(final.answer)
-                st.session_state.recent_sources = final.citations
-                st.session_state.qa_log.append(
-                    {
-                        "question": question,
-                        "answer": final.answer,
-                        "confidence": final.confidence,
-                        "citations": final.citations,
-                    }
+        with st.spinner("Retrieving evidence and generating answer..."):
+            effective_top_k = _get_query_top_k(question, top_k)
+            chunks, scores = retriever.search(question, top_k=effective_top_k)
+            chunks, scores = _rerank_chunks_for_query(chunks, scores, question)
+            st.session_state.last_contexts = chunks
+            try:
+                raw = answerer.generate_answer(
+                    question,
+                    chunks,
+                    st.session_state.memory.get(),
+                    num_predict=num_predict,
+                )
+                final = validate(raw.answer, chunks, scores)
+            except LLMRuntimeError as exc:
+                final = FinalResponse(
+                    answer=(
+                        "I couldn't generate the answer because local model memory is full. "
+                        "Please use a smaller model or close other GPU-heavy apps."
+                    ),
+                    citations=[],
+                    confidence="Low",
+                    rejected=True,
+                    reason=str(exc),
                 )
 
-            with st.chat_message("assistant"):
-                st.write(final.answer)
-                st.caption(f"Confidence: {final.confidence}")
-                if _is_diagram_query(question):
-                    _show_cited_diagram_pages(
-                        citations=final.citations,
-                        query=question,
-                        contexts=chunks,
+        st.session_state.memory.add_assistant(final.answer)
+        st.session_state.recent_sources = final.citations
+        st.session_state.qa_log.append(
+            {
+                "question": question,
+                "answer": final.answer,
+                "confidence": final.confidence,
+                "citations": final.citations,
+            }
+        )
+
+        with st.chat_message("assistant"):
+            st.write(final.answer)
+            st.markdown(
+                f'<div class="np-confidence">Confidence: <strong>{html.escape(final.confidence)}</strong></div>',
+                unsafe_allow_html=True,
+            )
+            if _is_diagram_query(question):
+                _show_cited_diagram_pages(
+                    citations=final.citations,
+                    query=question,
+                    contexts=chunks,
+                )
+            if final.citations:
+                st.markdown("**Sources**")
+                for cite in final.citations[:4]:
+                    st.markdown(
+                        f'<div class="np-source-chip">{html.escape(cite["filename"])} • page {cite["page_num"]}</div>',
+                        unsafe_allow_html=True,
                     )
-                if final.citations:
-                    st.markdown("**Citations:**")
-                    for cite in final.citations[:4]:
-                        st.write(f"- {cite['filename']} | page {cite['page_num']} | {cite['chunk_id']}")
-                else:
-                    st.caption(f"Reason: {final.reason}")
+            else:
+                st.caption(f"Reason: {final.reason}")
 
-    with right:
-        st.markdown("### Evidence Viewer")
-        contexts = st.session_state.last_contexts
-        if not contexts:
-            st.info("Ask a question to inspect supporting chunks.")
-        else:
-            for idx, chunk in enumerate(contexts, start=1):
-                with st.expander(f"{idx}. {chunk.filename} | page {chunk.page_num}", expanded=False):
-                    st.code(chunk.text[:900], language="text")
-                    st.caption(chunk.chunk_id)
 
-        st.markdown("### Latest Sources")
-        if not st.session_state.recent_sources:
-            st.caption("No sources yet.")
-        else:
-            for source in st.session_state.recent_sources[:4]:
-                st.write(f"- {source['filename']} | p.{source['page_num']}")
+def _render_evidence_panel() -> None:
+    st.markdown("### Evidence Viewer")
+    st.markdown('<div class="np-section-sub">Retrieved chunks used to ground the answer.</div>', unsafe_allow_html=True)
+    contexts = st.session_state.last_contexts
+    query = st.session_state.last_question
+    if not contexts:
+        st.info("Ask a question to inspect supporting chunks.")
+    else:
+        for idx, chunk in enumerate(contexts, start=1):
+            preview = _highlight_query_terms((chunk.text[:900] or ""), query)
+            st.markdown(
+                f"""
+                <div class="np-evidence-card">
+                  <div class="np-evidence-top">
+                    <span class="np-evidence-index">#{idx}</span>
+                    <span class="np-evidence-meta">{html.escape(chunk.filename)} • page {chunk.page_num}</span>
+                  </div>
+                  <div class="np-evidence-body">{preview}</div>
+                  <div class="np-evidence-id">{html.escape(chunk.chunk_id)}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
-    st.caption(
-        f"Offline target mode enabled. Model: {config.OLLAMA_MODEL_NAME} | "
-        f"Index DB: {config.VECTOR_DB_PATH}"
-    )
+    st.markdown("### Latest Sources")
+    if not st.session_state.recent_sources:
+        st.caption("No sources yet.")
+    else:
+        for src in st.session_state.recent_sources[:6]:
+            st.markdown(
+                f'<div class="np-latest-item">{html.escape(src["filename"])} • page {src["page_num"]}</div>',
+                unsafe_allow_html=True,
+            )
+
+
+def _highlight_query_terms(text: str, query: str) -> str:
+    escaped = html.escape(text)
+    terms = [t for t in _keyword_tokens(query) if len(t) > 3][:8]
+    if not terms:
+        return escaped.replace("\n", "<br>")
+    for term in terms:
+        pattern = re.compile(rf"(?i)\b({re.escape(term)})\b")
+        escaped = pattern.sub(r"<mark>\1</mark>", escaped)
+    return escaped.replace("\n", "<br>")
 
 
 def process_uploads(
@@ -277,144 +394,222 @@ def _inject_styles() -> None:
         """
         <style>
         :root {
-          --np-ink: #102a43;
-          --np-muted: #486581;
-          --np-bg-1: #f7f8f4;
-          --np-bg-2: #ece8dc;
-          --np-card: #ffffffcc;
-          --np-card-border: #d9e2ec;
-          --np-accent: #1f7a6a;
-          --np-accent-2: #2f855a;
-          --np-danger: #e53e3e;
-          --np-shadow: 0 12px 30px rgba(16, 42, 67, 0.08);
-          --np-radius: 16px;
+          --bg: #f7f9fc;
+          --card: #ffffff;
+          --ink: #0f172a;
+          --muted: #64748b;
+          --line: #e2e8f0;
+          --accent: #2563eb;
+          --accent-2: #22c55e;
+          --danger: #ef4444;
+          --shadow: 0 10px 28px rgba(2, 6, 23, 0.06);
+          --radius: 16px;
         }
         .stApp {
-          background:
-            radial-gradient(circle at 10% 0%, #fefcf6 0%, transparent 40%),
-            radial-gradient(circle at 90% 20%, #eef7f2 0%, transparent 38%),
-            linear-gradient(145deg, var(--np-bg-1) 0%, var(--np-bg-2) 100%);
-          color: var(--np-ink);
+          background: radial-gradient(circle at 0% 0%, #fdfefe, #f3f7fb 45%, #eef3f9 100%);
+          color: var(--ink);
         }
         .main .block-container {
-          max-width: 1280px;
-          padding-top: 1.2rem;
-          padding-bottom: 2rem;
-          animation: npFadeIn .45s ease-out;
-        }
-        h1, h2, h3 {
-          letter-spacing: -0.01em;
-          color: var(--np-ink) !important;
-        }
-        h1 {
-          font-weight: 800 !important;
-          font-size: clamp(2rem, 3vw, 3rem) !important;
-        }
-        p, li, .stMarkdown, .stCaption {
-          color: var(--np-muted) !important;
+          max-width: 1420px;
+          padding-top: 1rem;
+          padding-bottom: 1.8rem;
+          animation: fadeIn .35s ease-out;
         }
         [data-testid="stSidebar"] {
-          border-right: 1px solid var(--np-card-border);
-          background: linear-gradient(180deg, #f8fafc, #eef2f7);
+          background: linear-gradient(180deg, #0f172a, #111827);
+          color: #f8fafc !important;
+          border-right: 1px solid #1f2937;
         }
-        [data-testid="stSidebar"] .stSelectbox,
-        [data-testid="stSidebar"] .stButton,
-        [data-testid="stSidebar"] .stDownloadButton {
-          margin-bottom: 0.35rem;
+        [data-testid="stSidebar"] * {
+          color: #e2e8f0 !important;
         }
-        [data-testid="column"] {
-          animation: npSlideUp .45s ease-out;
+        [data-testid="stSidebar"] .stSelectbox > div > div {
+          background: #1f2937 !important;
+          border: 1px solid #334155 !important;
+        }
+        .np-sidebrand {
+          display: flex; gap: .7rem; align-items: center; margin-bottom: 1rem;
+          padding: .4rem .2rem;
+        }
+        .np-sidebrand-icon {
+          width: 34px; height: 34px; border-radius: 10px;
+          display: grid; place-items: center; font-weight: 800;
+          background: linear-gradient(135deg, #2563eb, #06b6d4); color: #fff;
+        }
+        .np-sidebrand-title { font-weight: 700; font-size: 1.02rem; color: #f8fafc; }
+        .np-sidebrand-sub { font-size: .78rem; color: #94a3b8; }
+        .np-header {
+          margin-bottom: .6rem;
+          padding: .65rem .2rem .2rem .2rem;
+        }
+        .np-header-title {
+          font-size: clamp(1.8rem, 2.6vw, 2.8rem);
+          font-weight: 800;
+          letter-spacing: -0.02em;
+          color: #0f172a;
+        }
+        .np-header-sub {
+          color: var(--muted);
+          margin-top: .28rem;
+        }
+        .np-metric {
+          background: var(--card);
+          border: 1px solid var(--line);
+          border-radius: 14px;
+          box-shadow: var(--shadow);
+          padding: .72rem .82rem;
+          margin-bottom: .65rem;
+        }
+        .np-metric-value {
+          font-weight: 800;
+          color: #0f172a;
+          font-size: 1rem;
+        }
+        .np-metric-label {
+          color: #64748b;
+          font-size: .78rem;
+          margin-top: .1rem;
         }
         [data-testid="column"] > div {
-          background: var(--np-card);
-          border: 1px solid var(--np-card-border);
-          border-radius: var(--np-radius);
-          box-shadow: var(--np-shadow);
-          padding: 0.8rem 0.9rem;
-          backdrop-filter: blur(6px);
+          background: var(--card);
+          border: 1px solid var(--line);
+          border-radius: var(--radius);
+          box-shadow: var(--shadow);
+          padding: .95rem 1rem;
+          height: 100%;
         }
-        .stFileUploader {
-          border-radius: 14px;
+        h3 {
+          font-size: 1.1rem !important;
+          font-weight: 700 !important;
+          margin-bottom: .35rem !important;
         }
-        .stButton > button,
-        .stDownloadButton > button {
-          width: 100%;
-          border-radius: 12px;
-          border: 1px solid transparent;
+        .np-section-sub {
+          color: #64748b;
+          font-size: .84rem;
+          margin-bottom: .5rem;
+        }
+        .np-file-grid { display: grid; gap: .5rem; margin: .4rem 0 .8rem 0; }
+        .np-file-card {
+          display: grid; grid-template-columns: 46px 1fr; gap: .58rem;
+          padding: .58rem; border: 1px solid var(--line); border-radius: 12px;
+          background: #f8fafc;
           transition: all .2s ease;
-          font-weight: 600;
+        }
+        .np-file-card:hover { transform: translateY(-1px); box-shadow: 0 8px 20px rgba(2,6,23,.08); }
+        .np-file-icon {
+          width: 46px; height: 46px; border-radius: 10px; display: grid; place-items: center;
+          font-size: .72rem; font-weight: 700; color: #fff;
+          background: linear-gradient(135deg, #ef4444, #f97316);
+        }
+        .np-file-name { font-weight: 600; color: #0f172a; }
+        .np-file-size { color: #64748b; font-size: .78rem; }
+        .stButton > button, .stDownloadButton > button {
+          border-radius: 12px !important;
+          font-weight: 700 !important;
+          transition: all .2s ease !important;
         }
         .stButton > button[kind="primary"] {
-          background: linear-gradient(90deg, var(--np-danger), #ff5a5f);
-          color: #fff;
-          box-shadow: 0 8px 18px rgba(229, 62, 62, .26);
+          background: linear-gradient(90deg, #2563eb, #4f46e5) !important;
+          border: 0 !important;
+          color: #fff !important;
+          box-shadow: 0 10px 22px rgba(37,99,235,.28);
         }
-        .stButton > button:hover,
-        .stDownloadButton > button:hover {
+        .stButton > button:hover, .stDownloadButton > button:hover {
           transform: translateY(-1px);
-          box-shadow: 0 6px 14px rgba(16, 42, 67, 0.16);
+          filter: brightness(1.03);
+        }
+        .stButton > button:disabled {
+          opacity: .55 !important;
+          cursor: not-allowed !important;
         }
         .stDownloadButton > button {
-          background: linear-gradient(90deg, var(--np-accent), var(--np-accent-2));
-          color: #fff;
+          background: linear-gradient(90deg, #0f766e, #16a34a) !important;
+          color: #fff !important;
+          border: 0 !important;
         }
         .stChatInputContainer {
-          background: #ffffffd9;
-          border: 1px solid var(--np-card-border);
           border-radius: 14px;
-          box-shadow: var(--np-shadow);
+          border: 1px solid var(--line);
+          background: #fff;
+          box-shadow: var(--shadow);
         }
         .stChatMessage {
-          border: 1px solid var(--np-card-border);
+          background: #fff;
+          border: 1px solid var(--line);
           border-radius: 14px;
-          background: #ffffffdd;
-          box-shadow: 0 8px 18px rgba(16, 42, 67, 0.08);
-          padding: 0.4rem 0.5rem;
+          box-shadow: 0 6px 16px rgba(2,6,23,.05);
+          animation: slideUp .22s ease-out;
         }
-        .stExpander {
-          border-radius: 12px !important;
-          border: 1px solid var(--np-card-border) !important;
-          background: #fff !important;
+        .np-confidence {
+          margin-top: .3rem; margin-bottom: .35rem;
+          color: #334155; font-size: .9rem;
         }
-        .np-hero-meta {
-          display: flex;
-          flex-wrap: wrap;
-          gap: .45rem;
-          margin: .35rem 0 .85rem 0;
+        .np-source-chip {
+          display: inline-flex; align-items: center;
+          margin: .14rem .3rem .14rem 0; padding: .22rem .56rem;
+          border-radius: 999px; border: 1px solid #bfdbfe;
+          background: #eff6ff; color: #1e3a8a;
+          font-size: .78rem; font-weight: 600;
         }
-        .np-pill {
-          display: inline-flex;
-          align-items: center;
-          padding: .34rem .62rem;
+        .np-evidence-card {
+          border: 1px solid var(--line);
+          border-radius: 12px;
+          background: #fff;
+          padding: .65rem .72rem;
+          margin-bottom: .58rem;
+          transition: all .18s ease;
+        }
+        .np-evidence-card:hover {
+          box-shadow: var(--shadow);
+          transform: translateY(-1px);
+        }
+        .np-evidence-top {
+          display: flex; justify-content: space-between; gap: .5rem;
+          margin-bottom: .38rem;
+        }
+        .np-evidence-index {
+          font-size: .72rem; font-weight: 700;
+          color: #1d4ed8; background: #dbeafe;
+          border-radius: 999px; padding: .12rem .45rem;
+        }
+        .np-evidence-meta { color: #334155; font-size: .78rem; font-weight: 600; }
+        .np-evidence-body { color: #334155; font-size: .84rem; line-height: 1.42; }
+        .np-evidence-body mark {
+          background: #fef08a;
+          border-radius: 4px;
+          padding: 0 .08rem;
+        }
+        .np-evidence-id { margin-top: .35rem; color: #94a3b8; font-size: .72rem; }
+        .np-latest-item {
+          border: 1px solid var(--line);
+          border-radius: 10px;
+          padding: .34rem .5rem;
+          margin-bottom: .32rem;
           font-size: .8rem;
-          font-weight: 600;
-          color: #0f5132;
-          background: #d9f2e8;
-          border: 1px solid #b7e4cf;
-          border-radius: 999px;
+          color: #334155;
+          background: #f8fafc;
         }
-        [data-testid="stImage"] img {
-          border-radius: 14px;
-          border: 1px solid var(--np-card-border);
-          box-shadow: var(--np-shadow);
+        .np-footer {
+          display: flex; gap: .8rem; flex-wrap: wrap;
+          margin-top: .9rem; padding: .62rem .7rem;
+          border: 1px solid var(--line); border-radius: 12px; background: #fff;
+          color: #64748b; font-size: .8rem;
         }
-        @media (max-width: 980px) {
-          .main .block-container {
-            padding-top: .65rem;
-            padding-left: .75rem;
-            padding-right: .75rem;
-          }
-          [data-testid="column"] > div {
-            padding: .7rem .7rem;
-          }
+        @media (max-width: 1100px) {
+          .main .block-container { padding-left: .8rem; padding-right: .8rem; }
         }
-        @keyframes npFadeIn {
+        @media (max-width: 900px) {
+          [data-testid="column"] > div { padding: .74rem .78rem; }
+          .np-header-title { font-size: 1.7rem; }
+          .np-footer { font-size: .74rem; }
+        }
+        @keyframes fadeIn {
           from { opacity: 0; transform: translateY(8px); }
-          to   { opacity: 1; transform: translateY(0); }
+          to { opacity: 1; transform: translateY(0); }
         }
-        @keyframes npSlideUp {
-          from { opacity: 0; transform: translateY(10px); }
-          to   { opacity: 1; transform: translateY(0); }
+        @keyframes slideUp {
+          from { opacity: 0; transform: translateY(6px); }
+          to { opacity: 1; transform: translateY(0); }
         }
         </style>
         """,
@@ -464,7 +659,6 @@ def _show_cited_diagram_pages(citations: list[dict], query: str, contexts: list)
 
 
 def _rank_cited_pages(query: str, citations: list[dict], contexts: list) -> list[tuple[str, int]]:
-    # Score each cited page by overlap with user query and diagram intent terms.
     query_tokens = set(_keyword_tokens(query))
     candidate_pages: set[tuple[str, int]] = set()
     for c in citations:
@@ -496,10 +690,8 @@ def _rank_cited_pages(query: str, citations: list[dict], contexts: list) -> list
             if "code" in text and "data take-on" in text:
                 score += 2.0
 
-        # Prefer chunks that explicitly mention diagram figure labels.
         if "fig." in text or "figure" in text or "[diagram notes]" in text:
             score += 1.5
-
         scores[key] += score
 
     ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
@@ -595,8 +787,6 @@ def _best_page_from_processed(query: str, citations: list[dict]) -> tuple[str, i
             score += 10.0
         if "[diagram notes]" in text or "fig." in text or "figure" in text:
             score += 1.2
-
-        # Prefer docs that semantically match query domain.
         if "dbms" in q and "dbms" in filename.lower():
             score += 2.0
         if "precedence" in q and "notes" in filename.lower():
@@ -609,6 +799,35 @@ def _best_page_from_processed(query: str, citations: list[dict]) -> tuple[str, i
     if best_key is None or best_score < 2.0:
         return None
     return best_key
+
+
+def _required_terms_for_query(q: str) -> list[str]:
+    must: list[str] = []
+    if "overall structure" in q:
+        must.extend(["overall", "structure"])
+    if "dbms" in q:
+        must.append("dbms")
+    if "precedence network" in q:
+        must.extend(["precedence", "network"])
+    if "network planning model" in q:
+        must.extend(["network", "planning", "model"])
+    if "er model" in q or "e-r model" in q:
+        must.extend(["entity", "relationship"])
+    seen = set()
+    out: list[str] = []
+    for t in must:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def _required_terms_present(required_terms: list[str], page_text: str) -> bool:
+    text_tokens = set(_keyword_tokens(page_text))
+    matched = sum(1 for term in required_terms if term in text_tokens or term in page_text)
+    if len(required_terms) <= 2:
+        return matched >= len(required_terms)
+    return matched >= max(2, len(required_terms) - 1)
 
 
 @st.cache_data(show_spinner=False)
@@ -630,36 +849,6 @@ def _render_pdf_page_png(filename: str, page_num: int, dpi: int = 220) -> bytes 
         return None
 
 
-def _required_terms_for_query(q: str) -> list[str]:
-    must: list[str] = []
-    if "overall structure" in q:
-        must.extend(["overall", "structure"])
-    if "dbms" in q:
-        must.append("dbms")
-    if "precedence network" in q:
-        must.extend(["precedence", "network"])
-    if "network planning model" in q:
-        must.extend(["network", "planning", "model"])
-    if "er model" in q or "e-r model" in q:
-        must.extend(["entity", "relationship"])
-    # keep unique order
-    seen = set()
-    out: list[str] = []
-    for t in must:
-        if t not in seen:
-            seen.add(t)
-            out.append(t)
-    return out
-
-
-def _required_terms_present(required_terms: list[str], page_text: str) -> bool:
-    text_tokens = set(_keyword_tokens(page_text))
-    matched = sum(1 for term in required_terms if term in text_tokens or term in page_text)
-    # Require strong match to avoid wrong diagram page.
-    if len(required_terms) <= 2:
-        return matched >= len(required_terms)
-    return matched >= max(2, len(required_terms) - 1)
-
-
 if __name__ == "__main__":
     main()
+

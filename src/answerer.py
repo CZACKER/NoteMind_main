@@ -66,7 +66,7 @@ class AnswerGenerator:
         }
 
         try:
-            response = self.client.chat(model=self.model_name, options=base_opts, messages=base_messages)
+            response = self._chat(model=self.model_name, options=base_opts, messages=base_messages)
             text = response["message"]["content"].strip()
             if _needs_diagram_retry(query, text):
                 text = self._retry_strict_diagram_answer(
@@ -97,7 +97,7 @@ class AnswerGenerator:
             "seed": 7,
         }
         try:
-            response = self.client.chat(
+            response = self._chat(
                 model=self.model_name,
                 options=reduced_opts,
                 messages=[
@@ -114,7 +114,7 @@ class AnswerGenerator:
         # OOM fallback attempt 2: smaller model (if pulled locally).
         if config.OLLAMA_FALLBACK_MODEL:
             try:
-                response = self.client.chat(
+                response = self._chat(
                     model=config.OLLAMA_FALLBACK_MODEL,
                     options=reduced_opts,
                     messages=[
@@ -139,6 +139,15 @@ class AnswerGenerator:
         raise LLMRuntimeError(
             "GPU out of memory in Ollama. Reduce model size or available context."
         )
+
+    def _chat(self, model: str, options: dict, messages: list[dict[str, str]]):
+        try:
+            return self.client.chat(model=model, options=options, messages=messages)
+        except ConnectionError as exc:
+            raise LLMRuntimeError(
+                "Could not connect to Ollama. Start Ollama and ensure it is reachable "
+                f"at {config.OLLAMA_HOST}. Then retry your question."
+            ) from exc
 
 
 def _build_context_block(contexts: list[Chunk]) -> str:
@@ -208,7 +217,13 @@ class LLMRuntimeError(RuntimeError):
 
 def _is_oom_error(exc: ResponseError) -> bool:
     text = str(exc).lower()
-    return ("out of memory" in text) or ("cudamalloc failed" in text) or ("runner process has terminated" in text)
+    return (
+        ("out of memory" in text)
+        or ("cudamalloc failed" in text)
+        or ("runner process has terminated" in text)
+        or ("requires more system memory" in text)
+        or ("model requires more system memory" in text)
+    )
 
 
 def _needs_diagram_retry(query: str, answer_text: str) -> bool:
