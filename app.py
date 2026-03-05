@@ -95,6 +95,16 @@ def main() -> None:
 
     st.title("NotesPilot: Offline Handwritten Notes QA")
     st.caption("Upload notes, build index, ask questions, and always get source-grounded answers.")
+    st.markdown(
+        """
+        <div class="np-hero-meta">
+          <span class="np-pill">Offline-first</span>
+          <span class="np-pill">Source-grounded answers</span>
+          <span class="np-pill">Diagram-aware retrieval</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     left, center, right = st.columns([1.25, 2.2, 1.4], gap="large")
 
@@ -267,19 +277,144 @@ def _inject_styles() -> None:
         """
         <style>
         :root {
-          --brand-ink: #12343b;
-          --brand-bg: #f4efe7;
-          --brand-card: #ffffff;
-          --brand-accent: #1e6f5c;
+          --np-ink: #102a43;
+          --np-muted: #486581;
+          --np-bg-1: #f7f8f4;
+          --np-bg-2: #ece8dc;
+          --np-card: #ffffffcc;
+          --np-card-border: #d9e2ec;
+          --np-accent: #1f7a6a;
+          --np-accent-2: #2f855a;
+          --np-danger: #e53e3e;
+          --np-shadow: 0 12px 30px rgba(16, 42, 67, 0.08);
+          --np-radius: 16px;
         }
         .stApp {
-          background: radial-gradient(circle at 10% 10%, #f7f4ee 0%, #efe6d8 50%, #eadfcf 100%);
-          color: var(--brand-ink);
+          background:
+            radial-gradient(circle at 10% 0%, #fefcf6 0%, transparent 40%),
+            radial-gradient(circle at 90% 20%, #eef7f2 0%, transparent 38%),
+            linear-gradient(145deg, var(--np-bg-1) 0%, var(--np-bg-2) 100%);
+          color: var(--np-ink);
+        }
+        .main .block-container {
+          max-width: 1280px;
+          padding-top: 1.2rem;
+          padding-bottom: 2rem;
+          animation: npFadeIn .45s ease-out;
+        }
+        h1, h2, h3 {
+          letter-spacing: -0.01em;
+          color: var(--np-ink) !important;
+        }
+        h1 {
+          font-weight: 800 !important;
+          font-size: clamp(2rem, 3vw, 3rem) !important;
+        }
+        p, li, .stMarkdown, .stCaption {
+          color: var(--np-muted) !important;
+        }
+        [data-testid="stSidebar"] {
+          border-right: 1px solid var(--np-card-border);
+          background: linear-gradient(180deg, #f8fafc, #eef2f7);
+        }
+        [data-testid="stSidebar"] .stSelectbox,
+        [data-testid="stSidebar"] .stButton,
+        [data-testid="stSidebar"] .stDownloadButton {
+          margin-bottom: 0.35rem;
+        }
+        [data-testid="column"] {
+          animation: npSlideUp .45s ease-out;
+        }
+        [data-testid="column"] > div {
+          background: var(--np-card);
+          border: 1px solid var(--np-card-border);
+          border-radius: var(--np-radius);
+          box-shadow: var(--np-shadow);
+          padding: 0.8rem 0.9rem;
+          backdrop-filter: blur(6px);
+        }
+        .stFileUploader {
+          border-radius: 14px;
+        }
+        .stButton > button,
+        .stDownloadButton > button {
+          width: 100%;
+          border-radius: 12px;
+          border: 1px solid transparent;
+          transition: all .2s ease;
+          font-weight: 600;
+        }
+        .stButton > button[kind="primary"] {
+          background: linear-gradient(90deg, var(--np-danger), #ff5a5f);
+          color: #fff;
+          box-shadow: 0 8px 18px rgba(229, 62, 62, .26);
+        }
+        .stButton > button:hover,
+        .stDownloadButton > button:hover {
+          transform: translateY(-1px);
+          box-shadow: 0 6px 14px rgba(16, 42, 67, 0.16);
+        }
+        .stDownloadButton > button {
+          background: linear-gradient(90deg, var(--np-accent), var(--np-accent-2));
+          color: #fff;
+        }
+        .stChatInputContainer {
+          background: #ffffffd9;
+          border: 1px solid var(--np-card-border);
+          border-radius: 14px;
+          box-shadow: var(--np-shadow);
         }
         .stChatMessage {
-          border: 1px solid #dfd3c3;
+          border: 1px solid var(--np-card-border);
           border-radius: 14px;
-          background: var(--brand-card);
+          background: #ffffffdd;
+          box-shadow: 0 8px 18px rgba(16, 42, 67, 0.08);
+          padding: 0.4rem 0.5rem;
+        }
+        .stExpander {
+          border-radius: 12px !important;
+          border: 1px solid var(--np-card-border) !important;
+          background: #fff !important;
+        }
+        .np-hero-meta {
+          display: flex;
+          flex-wrap: wrap;
+          gap: .45rem;
+          margin: .35rem 0 .85rem 0;
+        }
+        .np-pill {
+          display: inline-flex;
+          align-items: center;
+          padding: .34rem .62rem;
+          font-size: .8rem;
+          font-weight: 600;
+          color: #0f5132;
+          background: #d9f2e8;
+          border: 1px solid #b7e4cf;
+          border-radius: 999px;
+        }
+        [data-testid="stImage"] img {
+          border-radius: 14px;
+          border: 1px solid var(--np-card-border);
+          box-shadow: var(--np-shadow);
+        }
+        @media (max-width: 980px) {
+          .main .block-container {
+            padding-top: .65rem;
+            padding-left: .75rem;
+            padding-right: .75rem;
+          }
+          [data-testid="column"] > div {
+            padding: .7rem .7rem;
+          }
+        }
+        @keyframes npFadeIn {
+          from { opacity: 0; transform: translateY(8px); }
+          to   { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes npSlideUp {
+          from { opacity: 0; transform: translateY(10px); }
+          to   { opacity: 1; transform: translateY(0); }
         }
         </style>
         """,
@@ -437,6 +572,7 @@ def _best_page_from_processed(query: str, citations: list[dict]) -> tuple[str, i
     cited_files = {str(c.get("filename", "")) for c in citations if c.get("filename")}
     q = query.lower()
     q_tokens = set(_keyword_tokens(query))
+    required_terms = _required_terms_for_query(q)
 
     best_key: tuple[str, int] | None = None
     best_score = 0.0
@@ -445,6 +581,8 @@ def _best_page_from_processed(query: str, citations: list[dict]) -> tuple[str, i
         if cited_files and filename not in cited_files:
             continue
         text = row["text"].lower()
+        if required_terms and not _required_terms_present(required_terms, text):
+            continue
         tokens = set(_keyword_tokens(text))
         score = float(len(q_tokens & tokens))
         if "overall structure" in q and "overall structure" in text:
@@ -457,6 +595,12 @@ def _best_page_from_processed(query: str, citations: list[dict]) -> tuple[str, i
             score += 10.0
         if "[diagram notes]" in text or "fig." in text or "figure" in text:
             score += 1.2
+
+        # Prefer docs that semantically match query domain.
+        if "dbms" in q and "dbms" in filename.lower():
+            score += 2.0
+        if "precedence" in q and "notes" in filename.lower():
+            score += 1.0
 
         if score > best_score:
             best_score = score
@@ -484,6 +628,37 @@ def _render_pdf_page_png(filename: str, page_num: int, dpi: int = 220) -> bytes 
         return image_bytes
     except Exception:
         return None
+
+
+def _required_terms_for_query(q: str) -> list[str]:
+    must: list[str] = []
+    if "overall structure" in q:
+        must.extend(["overall", "structure"])
+    if "dbms" in q:
+        must.append("dbms")
+    if "precedence network" in q:
+        must.extend(["precedence", "network"])
+    if "network planning model" in q:
+        must.extend(["network", "planning", "model"])
+    if "er model" in q or "e-r model" in q:
+        must.extend(["entity", "relationship"])
+    # keep unique order
+    seen = set()
+    out: list[str] = []
+    for t in must:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def _required_terms_present(required_terms: list[str], page_text: str) -> bool:
+    text_tokens = set(_keyword_tokens(page_text))
+    matched = sum(1 for term in required_terms if term in text_tokens or term in page_text)
+    # Require strong match to avoid wrong diagram page.
+    if len(required_terms) <= 2:
+        return matched >= len(required_terms)
+    return matched >= max(2, len(required_terms) - 1)
 
 
 if __name__ == "__main__":
